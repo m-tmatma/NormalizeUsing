@@ -4,11 +4,17 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.OLE.Interop;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.Win32;
+using EnvDTE;
+using EnvDTE80;
 
 namespace NormalizeUsing
 {
@@ -29,6 +35,10 @@ namespace NormalizeUsing
     /// To get loaded into VS, the package must be referred by &lt;Asset Type="Microsoft.VisualStudio.VsPackage" ...&gt; in .vsixmanifest file.
     /// </para>
     /// </remarks>
+    [ProvideAutoLoad(UIContextGuids80.NoSolution)]
+    [ProvideAutoLoad(UIContextGuids80.SolutionExists)]
+    [ProvideAutoLoad(UIContextGuids80.SolutionHasSingleProject)]
+    [ProvideAutoLoad(UIContextGuids80.SolutionHasMultipleProjects)]
     [PackageRegistration(UseManagedResourcesOnly = true)]
     [InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)] // Info on this package for Help/About
     [Guid(VSPackage.PackageGuidString)]
@@ -53,6 +63,8 @@ namespace NormalizeUsing
 
         #region Package Members
 
+        private DocumentEvents documentEvents;
+
         /// <summary>
         /// Initialization of the package; this method is called right after the package is sited, so this is the place
         /// where you can put all the initialization code that rely on services provided by VisualStudio.
@@ -60,8 +72,89 @@ namespace NormalizeUsing
         protected override void Initialize()
         {
             base.Initialize();
+
+            var dte = GetService(typeof(DTE)) as DTE2;
+            documentEvents = dte.Events.DocumentEvents;
+            documentEvents.DocumentSaved += DocumentEvents_DocumentSaved;
         }
 
+        void DocumentEvents_DocumentSaved(Document document)
+        {
+            var path = document.FullName;
+            var lang = document.Language;
+            if (document.Kind != "{8E7B96A8-E33D-11D0-A6D5-00C04FB67F6A}")
+            {
+                // then it's not a text file
+                return;
+            }
+            if (!lang.Equals("CSharp"))
+            {
+                return;
+            }
+
+            var regEx = new Regex("(using\\s+((\\w+)(\\.(\\w+))*);)", RegexOptions.None);
+            var firstList = new List<string>();
+            var secondList = new List<string>();
+            var usingList = new List<string>();
+            var isFound = false;
+ 
+            using (var stream = new FileStream(path, FileMode.Open))
+            {
+                using (var reader = new StreamReader(stream, Encoding.Default, true))
+                {
+                    while(true)
+                    {
+                        var text = reader.ReadLine();
+                        if (text == null)
+                        {
+                            usingList.Sort();
+                            break;
+                        }
+
+                        var match = regEx.Match(text);
+                        if (match.Success)
+                        {
+                            var value = match.Groups[1].Value;
+                            usingList.Add(value);
+                            isFound = true;
+                        }
+                        else if (isFound)
+                        {
+                            secondList.Add(text);
+                        }
+                        else
+                        {
+                            firstList.Add(text);
+                        }
+                    }
+                }
+            }
+
+            var temp_path = document.FullName + ".tmp";
+            using (var stream = new FileStream(temp_path, FileMode.Create))
+            {
+                using (var writer = new StreamWriter(stream, Encoding.Default))
+                {
+                    foreach (var line in firstList)
+                    {
+                        writer.Write(line + Environment.NewLine);
+                    }
+                    foreach (var line in usingList)
+                    {
+                        writer.Write(line + Environment.NewLine);
+                    }
+                    foreach (var line in secondList)
+                    {
+                        writer.Write(line + Environment.NewLine);
+                    }
+                }
+            }
+
+            File.Delete(path);
+            File.Move(temp_path, path);
+
+            File.SetLastWriteTime(path, DateTime.Now);
+        }
         #endregion
     }
 }
